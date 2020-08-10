@@ -6,7 +6,7 @@ from random import randint
 from time import sleep
 import tensorflow as tf
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
-from tensorflow.keras.layers import LSTM, Dense, Embedding
+from tensorflow.keras.layers import LSTM, Dense, Embedding, Dropout
 from tensorflow.keras.models import Sequential, load_model
 
 
@@ -148,17 +148,18 @@ def ready_model(dataset, voc_size, batches=5, emb_dim=1, name='model'):
                 output_dim=emb_dim,
                 batch_input_shape=[batches, None]
             ),
-            LSTM(64,
+            LSTM(128,
                  return_sequences=True,
                  stateful=True,
                  recurrent_initializer='glorot_uniform'
                  ),
-            LSTM(64,
+            LSTM(128,
                  return_sequences=True,
                  stateful=True,
                  recurrent_initializer='glorot_uniform'
                  ),
-            LSTM(64,
+            Dropout(0.3),
+            LSTM(128,
                  return_sequences=True,
                  stateful=True,
                  recurrent_initializer='glorot_uniform'
@@ -174,7 +175,7 @@ def ready_model(dataset, voc_size, batches=5, emb_dim=1, name='model'):
 
     # Finalise and View Model Details
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    model.fit(dataset, epochs=300, use_multiprocessing=True, workers=-1, callbacks=[saver_callback])
+    model.fit(dataset, epochs=1000, use_multiprocessing=True, workers=-1)
     model.summary()
     return model
 
@@ -206,7 +207,7 @@ def tweet_generator(model, char2index, index2char, start_string, num_generate=10
         # Add to output
         text_generated.append((' ' + index2char[predicted_id]) if element_type == 'word' else index2char[predicted_id])
 
-    return start_string + ''.join(text_generated)
+    return start_string.capitalize() + ''.join(text_generated)
 
 
 def start_sending_tweets(run_with_api, num_elements=None, model_name='model_tweet_file', element_type='word'):
@@ -220,12 +221,12 @@ def start_sending_tweets(run_with_api, num_elements=None, model_name='model_twee
         # Prepare random sequence to start with
         words = get_words(tweets)
         index = randint(0, len(words) - 1 - sequence_length)
-        words = words[index:index + sequence_length]
+        words = words[index:index + 3]
         start = ''
         for word in words:
             start += word + ' '
 
-        gen = tweet_generator(model, c2i, i2c, start.capitalize(), num_generate=num_elements, element_type=element_type) + ' '
+        gen = tweet_generator(model, c2i, i2c, start, num_generate=num_elements, element_type=element_type) + ' '
         print('GENERATED: %s' % gen)
         print('Sending Tweet', end=': a, ')
         run_with_api.update_status(gen)
@@ -316,4 +317,4 @@ if __name__ == '__main__':
     out_model = ready_model(data, voc_size=vocabulary_size, batches=batch_size, emb_dim=embedding_dimensions)
 
     # Use trained Models
-    start_sending_tweets(api, num_elements=280, model_name='model-175', element_type=e_type)
+    start_sending_tweets(api, num_elements=280, model_name='word_model_list_2', element_type=e_type)
