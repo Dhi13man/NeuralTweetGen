@@ -174,7 +174,7 @@ def ready_model(dataset, voc_size, batches=5, emb_dim=1, name='model'):
 
     # Finalise and View Model Details
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    model.fit(dataset, epochs=100, use_multiprocessing=True, workers=-1, callbacks=[saver_callback])
+    model.fit(dataset, epochs=300, use_multiprocessing=True, workers=-1, callbacks=[saver_callback])
     model.summary()
     return model
 
@@ -209,7 +209,11 @@ def tweet_generator(model, char2index, index2char, start_string, num_generate=10
     return start_string + ''.join(text_generated)
 
 
-def start_sending_tweets(run_with_api, num_words=None, model_name='model_tweet_file', element_type='word'):
+def start_sending_tweets(run_with_api, num_elements=None, model_name='model_tweet_file', element_type='word'):
+    # Use Twitter 280 character limit if element_type is 'char' and num_elements is not specified
+    if element_type == 'char' and num_elements is None:
+        num_elements = 280
+
     model = load_model('nn_checkpoints\\' + model_name + '.hdf5')
     # Generate and Send Tweet
     try:
@@ -221,7 +225,7 @@ def start_sending_tweets(run_with_api, num_words=None, model_name='model_tweet_f
         for word in words:
             start += word + ' '
 
-        gen = tweet_generator(model, c2i, i2c, start, num_generate=num_words, element_type=element_type) + ' '
+        gen = tweet_generator(model, c2i, i2c, start.capitalize(), num_generate=num_elements, element_type=element_type) + ' '
         print('GENERATED: %s' % gen)
         print('Sending Tweet', end=': a, ')
         run_with_api.update_status(gen)
@@ -254,7 +258,7 @@ def start_sending_tweets(run_with_api, num_words=None, model_name='model_tweet_f
 if __name__ == '__main__':
     # Authenticate and analyse Basic Global Variables for RNN
     api = authenticate()
-    embedding_dimensions, batch_size, buffer_size, sequence_length, e_type = 10, 1, 10000, 15, 'char'
+    embedding_dimensions, batch_size, buffer_size, sequence_length, e_type = 10, 1, 10000, 25, 'word'
 
     # List of central tweets to revolve your Automatically Generated Tweets around
     tweets = [
@@ -300,16 +304,16 @@ if __name__ == '__main__':
     ]
 
     # Use extra tweets in tweets file or the web (searched with given keywords) for training
-    words_in_tweets, keywords = Counter(get_words(tweets)), ''
-    for common_word in words_in_tweets.most_common(3):
-        keywords += common_word[0] + ' '
-    new = get_recent_tweets(1000, keywords, 'disk')
-    for tweet_this in new:
-        tweets.append(tweet_this)
+    #words_in_tweets, keywords = Counter(get_words(tweets)), ''
+    #for common_word in words_in_tweets.most_common(3):
+    #    keywords += common_word[0] + ' '
+    #new = get_recent_tweets(1000, keywords, 'disk')
+    #for tweet_this in new:
+    #    tweets.append(tweet_this)
 
     # Get Data and Train
     data, i2c, c2i, text_per_epoch, vocabulary_size = ready_dataset(e_type)
     out_model = ready_model(data, voc_size=vocabulary_size, batches=batch_size, emb_dim=embedding_dimensions)
 
     # Use trained Models
-    start_sending_tweets(api, num_words=25, model_name='model-64', element_type=e_type)
+    start_sending_tweets(api, num_elements=280, model_name='model-175', element_type=e_type)
