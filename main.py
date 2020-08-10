@@ -1,28 +1,38 @@
-from collections import defaultdict
+from collections import Counter
 
 import tweepy
 import numpy as np
 from random import randint
 from time import sleep
-from tensorflow.keras.utils import to_categorical
+import tensorflow as tf
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
-from tensorflow.keras.layers import LSTM, Dense, Embedding, Dropout, TimeDistributed
+from tensorflow.keras.layers import LSTM, Dense, Embedding
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.initializers import Constant
 
 
-def authenticate():
+def authenticate(api_file_name='ActualAPI.txt'):
+    """
+    Authenticates Twitter Developer account and returns a Tweepy based API
+    :param api_file_name: String, Name of file where API keys are stored as 4 consecutive lines of no other characters:
+        Line 1: Client Key
+        Line 2: Client Secret
+        Line 3: Api Key
+        Line 4: Api Secret
+    :return: Authenticated Tweepy API object
+    """
     # Authenticate to Twitter
     do_it = 'y'
     while do_it == 'y':
         # Write actual keys of your Twitter Developer Account in APIKeys.txt
         # (client_key, client_secret, api_key, api_secret) in 4 consecutive lines respectively; no other characters
-        file = open('APIKeys.txt', 'r')
+        file = open(api_file_name, 'r')
         temp_keys = file.readlines()
         keys = []
         for n, key in enumerate(temp_keys):
             keys.append(key[:-1] if n < len(temp_keys) - 1 else key)
         client_key, client_secret, api_key, api_secret = keys
+
+        # Authenticate to Twitter Developer Account
         print('Authenticating...')
         auth = tweepy.OAuthHandler(client_key, client_secret)
         auth.set_access_token(api_key, api_secret)
@@ -37,12 +47,49 @@ def authenticate():
     return None
 
 
-def get_recent_tweets(num):
-    tw_json = api.search(q="hot pockets snowden", lang="en", rpp=num)
-    return tw_json
+def get_recent_tweets(num, keys, source='disk'):
+    """
+    Retrieves the recent most relevant tweets containing 'keys' from Twitter, using Twitter's search API.
+    :param num: Integer, Number of Tweets to retrieve.
+    :param keys: String, The query string to search for
+    :param source: String, 'disk': Function retrieves 'num' tweets from 'tweets' file in working directory
+                           'web': Function retrieves 'num' relevant tweets from Twitter search of 'keys'
+    :return: Array of strings: List of tweets retrieved
+    """
+    new_tweets = []
+    if source == 'web':
+        tw_json = tweepy.Cursor(api.search, q=keys).items(num)
+        for item in tw_json:
+            new_tweets.append(str(item.text).replace('https://t.co/', ''))
+        file = open('tweets', 'w', encoding='utf8')
+        for this in new_tweets:
+            file.write(this)
+            file.write('\n')
+    else:
+        file = open('tweets', 'r', encoding='utf8')
+        for this in file.readlines():
+            new_tweets.append(this)
+    return new_tweets
+
+
+def get_characters(sentences):
+    """
+    Helper function to return all words from an array of sentences.
+    :param sentences: Array of sentences, here tweets. Here, string
+    :return: Array of words (array of strings)
+    """
+    characters = ''
+    for tweet in sentences:
+        characters += tweet
+    return characters
 
 
 def get_words(sentences):
+    """
+    Helper function to return all words from an array of sentences.
+    :param sentences: Array of sentences, here tweets. Here, string
+    :return: words: Array of words (array of strings)
+    """
     words = np.array([])
     for tweet in sentences:
         changed_tweet = tweet.replace('\n', ' ')
@@ -51,207 +98,165 @@ def get_words(sentences):
     return words
 
 
-def get_maps(sentences):
-    # Create Mappings
-    words = sorted(set(get_words(sentences)))
-    word_ind = dict((w, ind) for ind, w in enumerate(words))
-    ind_word = dict((ind, w) for ind, w in enumerate(words))
+def ready_dataset(element_type='word'):
+    """
+    Prepares Dataset for Training and Mappings for both Training and testing either in terms of words or characters.
+    :param element_type: String, 'word' to predict one word at a time, 'char' to predict one character at a time.=
+    :returns:
+    dataset: Tensor; (input, target) data;
+    ind2char: Dictionary; Mapping from index to character/word
+    char2ind: List; Mapping from index to character/word
+    per_epoch: Integer; Number of words/characters per epoch
+    len(vocab): Integer; Vocabulary size. Number of unique elements.
+    """
+    text = get_words(tweets) if element_type == 'word' else get_characters(tweets)
+    vocab = sorted(set(text))
 
-    vocabulary_size = len(word_ind)
-    return word_ind, ind_word, vocabulary_size
+    # Make Mappings
+    char2ind = {char: index for index, char in enumerate(vocab)}
+    ind2char = np.array(vocab)
+    per_epoch = len(text) // (sequence_length + 1)
 
+    def xy_split(this_text):
+        x_text = this_text[:-1]
+        y_text = this_text[1:]
+        return x_text, y_text
 
-def use_glove_emb(sentences, num_dim=25):
-    if num_dim not in [25, 50, 100, 200]:
-        emb_dim = 25
-    else:
-        emb_dim = num_dim
-
-    def load_embedding_from_disks(glove_filename):
-        word_to_index_dict = dict()
-        index_to_embedding_array = []
-
-        with open(glove_filename, 'r', encoding="utf8") as glove_file:
-            for (i, line) in enumerate(glove_file.readlines()):
-                split = line.split(' ')
-                word = split[0]
-
-                representation = split[1:]
-                representation = np.array(
-                    [float(val) for val in representation]
-                )
-
-                word_to_index_dict[word] = i
-                index_to_embedding_array.append(representation)
-
-        _WORD_NOT_FOUND = [0.0] * len(representation)  # Empty representation for unknown words
-        _LAST_INDEX = i + 1
-        word_to_index_dict = defaultdict(lambda: _LAST_INDEX, word_to_index_dict)
-        index_to_embedding_array = np.array(index_to_embedding_array + [_WORD_NOT_FOUND])
-        return word_to_index_dict, index_to_embedding_array
-
-    w0, i0 = load_embedding_from_disks('glove' + str(emb_dim) + 'd.txt')
-
-    words = sorted(set(get_words(sentences)))
-    i0 = i0[:, :num_dim]
-
-    # Add unknown words present in Sentences to Embeddings and indices
-    for word in words:
-        if word not in list(w0.keys()):
-            temp = int(np.max(i0) + 1) * (2 * np.random.rand(1, num_dim) - 1)
-            w0.__setitem__(word, i0.shape[0])
-            i0 = np.concatenate([i0, temp], axis=0)
-    del temp
-
-    # Create required dictionaries and Embedding Matrix
-    word2ind, ind2emb = w0, i0
-    ind2word_emb = [dict(zip(word2ind.values(), word2ind.keys())), ind2emb]
-
-    return word2ind, ind2emb, ind2word_emb
+    # Create training dataset.
+    text_int = np.array([char2ind[char] for char in text])
+    char_dataset = tf.data.Dataset.from_tensor_slices(text_int)
+    sequences = char_dataset.batch(sequence_length + 1, drop_remainder=True)
+    dataset = sequences.map(xy_split)
+    dataset = dataset.shuffle(buffer_size).batch(batch_size, drop_remainder=True)
+    return dataset, ind2char, char2ind, per_epoch, len(vocab)
 
 
-def ready_model(sentences, batches=5, emb_dim=1, step_size=1, name='model'):
-    if name == 'glove':
-        word2ind, ind2emb, ind2word = use_glove_emb(sentences, num_dim=emb_dim)
-        vocabulary_size = len(word2ind) + 1
-    else:
-        word2ind, ind2word, vocabulary_size = get_maps(sentences)
-
+def ready_model(dataset, voc_size, batches=5, emb_dim=1, name='model'):
+    """
+    Creates and trains the Model on the dataset created on and passed as parameter.
+    :param dataset: Tensor; (input, target) pairs prepared using ready_dataset()
+    :param voc_size: Integer; Unique elements
+    :param batches: Integer; Number of batches
+    :param emb_dim: Integer; Depth of Embedding to be used in Embedding Keras Layer
+    :param name: String; Name of models to save the checkpoints as (saved every epoch by default).
+    :return: model: Tensorflow Keras Sequential RNN model trained on dataset
+    """
     def rnn_model():
         nn = Sequential([
             Embedding(
-                input_dim=vocabulary_size,
-                embeddings_initializer=Constant(ind2emb) if name == 'glove' else None,
-                trainable=False,
+                input_dim=voc_size,
                 output_dim=emb_dim,
+                batch_input_shape=[batches, None]
             ),
-            LSTM(20,
+            LSTM(64,
                  return_sequences=True,
+                 stateful=True,
                  recurrent_initializer='glorot_uniform'
                  ),
-            LSTM(20,
+            LSTM(64,
                  return_sequences=True,
+                 stateful=True,
                  recurrent_initializer='glorot_uniform'
                  ),
-            TimeDistributed(Dense(emb_dim))
+            LSTM(64,
+                 return_sequences=True,
+                 stateful=True,
+                 recurrent_initializer='glorot_uniform'
+                 ),
+            Dense(vocabulary_size, activation='softmax')
         ])
         return nn
 
-    def get_train_data():
-        x, y = np.zeros((batches, step_size)), np.zeros((batches, step_size, emb_dim))
-        curr = 0
-        while True:
-            for num in range(batches):
-                if curr + step_size >= len(words):
-                    # reset the index back to the start of the data set
-                    curr = 0
-                x[num, :] = words[curr:curr + step_size]
-                for step in range(step_size):
-                    y[num, step, :] = ind2emb[words[curr + step + 1]]
-                curr += 1
-            yield x, y
-
-    words = get_words(sentences)
-    words = np.array([word2ind[this_word] for this_word in words])
-
+    # Prepare model and Callbacks
     model = rnn_model()
     saver_callback = ModelCheckpoint(filepath='nn_checkpoints' + '/' + name + '-{epoch:02d}.hdf5', verbose=1)
     # end_callback = EarlyStopping(monitor='categorical_accuracy', min_delta=0.001)
 
-    model.compile(optimizer='adam', loss='mean_squared_error', metrics=['accuracy'])
-    model.fit(get_train_data(), epochs=10, steps_per_epoch=5000, batch_size=len(words) // (batches * step_size),
-              use_multiprocessing=True, workers=-1, callbacks=[saver_callback])
+    # Finalise and View Model Details
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    model.fit(dataset, epochs=100, use_multiprocessing=True, workers=-1, callbacks=[saver_callback])
     model.summary()
-    return model, word2ind, ind2word, vocabulary_size
+    return model
 
 
-def tweet_generator(model, w_i, i_w, num_steps=1, total_words=15):
-    # Pre-Computations
-    changed_tweets = []
-    for num, tweet in enumerate(tweets):
-        changed_tweets.append(tweet.replace('\n', ' '))
-    batches = int(total_words / num_steps)
-    if embedding_type == 'glove':
-        ind2word = i_w[0]
-        ind2emb = i_w[1]
+def tweet_generator(model, char2index, index2char, start_string, num_generate=1000, element_type='word', temperature=1.0):
+    # Converting our start string to numbers
+    input_indices = [char2index[s] for s in (start_string.split(' ') if element_type == 'word' else start_string)]
+    input_indices = tf.expand_dims(input_indices, 0)
 
-    outs, out_word = '', ''
+    # Empty string to store our results.
+    text_generated = []
 
-    words = changed_tweets[randint(0, len(tweets) - 1)].split(' ')
-    out_word = words[randint(0, len(words) - 1)]
-    x = np.zeros(num_steps)
+    model.reset_states()
+    for char_index in range(num_generate):
+        predictions = model(input_indices)
+        # remove the batch dimension
+        predictions = tf.squeeze(predictions, 0)
 
-    for batch in range(batches):
-        for step in range(num_steps):
-            chosen_index = w_i[out_word]
-            x[step] = chosen_index
-            out_emb = model.predict(x)[step, :]
-            closest_emb_index = np.argmax(np.sum((ind2emb - out_emb) ** 2, axis=1))
-            out_word = ind2word[closest_emb_index]
-            outs += out_word + ' '
-        
-    # Formatting Tweet Better
-    final_string, flag = '', 0
-    for out_num, char in enumerate(outs):
-        if flag == 0 or not char.isalpha():
-            final_string += char
-        else:
-            final_string += char.upper()
-            flag = 0
-            continue
-        if not char.isalnum():
-            flag = 1
-    outs = final_string.capitalize()
-    return outs
+        # Using a categorical distribution to predict the character returned by the model.
+        predictions = predictions / temperature
+        predicted_id = tf.random.categorical(
+            predictions,
+            num_samples=1
+        )[-1, 0].numpy()
+
+        # We pass the predicted character as the next input to the model along with the previous hidden state.
+        input_indices = tf.expand_dims([predicted_id], 0)
+
+        # Add to output
+        text_generated.append((' ' + index2char[predicted_id]) if element_type == 'word' else index2char[predicted_id])
+
+    return start_string + ''.join(text_generated)
 
 
-def start_sending_tweets(api=None, num_words=None, name='model'):
-    if num_words is None:
-        num_words = Batches * step_size
+def start_sending_tweets(run_with_api, num_words=None, model_name='model_tweet_file', element_type='word'):
+    model = load_model('nn_checkpoints\\' + model_name + '.hdf5')
+    # Generate and Send Tweet
+    try:
+        # Prepare random sequence to start with
+        words = get_words(tweets)
+        index = randint(0, len(words) - 1 - sequence_length)
+        words = words[index:index + sequence_length]
+        start = ''
+        for word in words:
+            start += word + ' '
 
-    # Get required mappings
-    words_to_indices, indices_to_words, _ = get_maps(tweets)
-    if name == 'glove':
-        words_to_indices, indices_to_emb, indices_to_words = use_glove_emb(tweets, embedding_dimensions)
-
-    model1 = load_model('nn_checkpoints\\' + name + '-06.hdf5')
-    model2 = load_model('nn_checkpoints\\' + name + '-06.hdf5')
-    for i in range(10, 3000):
-        try:
-            model = model1 if i % 2 == 0 else model2
-            gen = tweet_generator(model, words_to_indices, indices_to_words, num_steps=step_size
-                                  , total_words=num_words) + ' ' + str(i)
-            print('GENERATED: %s' % gen)
-            print('Sending Tweet %d' % i, end=': a, ')
-            api.update_status(gen)
-            sleep(randint(30, 50))
-            print('b', end=', ')
-            api.update_status(tweets[1] + ' ' + str(i))
-            sleep(randint(30, 50))
-            print('c', end=', ')
-            api.update_status(tweets[2] + ' ' + str(i))
-            sleep(randint(50, 90))
-            print('d', end=', ')
-            api.update_status(tweets[3] + ' ' + str(i))
-            sleep(randint(50, 90))
-            print('e', end=', ')
-            api.update_status(tweets[0] + ' ' + str(i))
-            sleep(randint(70, 90))
-            print('f', end=', ')
-            api.update_status(tweets[4] + ' ' + str(i))
-            sleep(randint(70, 90))
-            print('g')
-            api.update_status(tweets[5] + ' ' + str(i))
-            sleep(randint(90, 110))
-        except tweepy.error.TweepError:
-            continue
+        gen = tweet_generator(model, c2i, i2c, start, num_generate=num_words, element_type=element_type) + ' '
+        print('GENERATED: %s' % gen)
+        print('Sending Tweet', end=': a, ')
+        run_with_api.update_status(gen)
+        sleep(randint(30, 50))
+        print('b', end=', ')
+        run_with_api.update_status(tweets[1])
+        sleep(randint(30, 50))
+        print('c', end=', ')
+        run_with_api.update_status(tweets[2])
+        sleep(randint(50, 90))
+        print('d', end=', ')
+        run_with_api.update_status(tweets[3])
+        sleep(randint(50, 90))
+        print('e', end=', ')
+        run_with_api.update_status(tweets[0])
+        sleep(randint(70, 90))
+        print('f', end=', ')
+        run_with_api.update_status(tweets[4])
+        sleep(randint(70, 90))
+        print('g')
+        run_with_api.update_status(tweets[5])
+        sleep(randint(90, 110))
+    except tweepy.error.TweepError:
+        choice = input('Error while Sending. Try Again? (Y/N): ')
+        if choice == 'Y':
+            start_sending_tweets()
 
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
+    # Authenticate and analyse Basic Global Variables for RNN
     api = authenticate()
-    embedding_dimensions, Batches, step_size, embedding_type = 10, 5, 5, 'glove'
+    embedding_dimensions, batch_size, buffer_size, sequence_length, e_type = 10, 1, 10000, 15, 'char'
 
+    # List of central tweets to revolve your Automatically Generated Tweets around
     tweets = [
         'Whole semester is to be conducted online' +
         '\nBut NITians are to pay FULL TUITION FEE amount of ₹62500' +
@@ -294,9 +299,17 @@ if __name__ == '__main__':
         'and are facing an economic crisis '
     ]
 
-    out_model, words_to_indices, indices_to_words, voc_siz = ready_model(tweets, batches=Batches, step_size=step_size,
-                                                                         emb_dim=embedding_dimensions,
-                                                                         name=embedding_type)
-    out_model.save('net_speak')
+    # Use extra tweets in tweets file or the web (searched with given keywords) for training
+    words_in_tweets, keywords = Counter(get_words(tweets)), ''
+    for common_word in words_in_tweets.most_common(3):
+        keywords += common_word[0] + ' '
+    new = get_recent_tweets(1000, keywords, 'disk')
+    for tweet_this in new:
+        tweets.append(tweet_this)
 
-    start_sending_tweets(name=embedding_type, num_words=25)
+    # Get Data and Train
+    data, i2c, c2i, text_per_epoch, vocabulary_size = ready_dataset(e_type)
+    out_model = ready_model(data, voc_size=vocabulary_size, batches=batch_size, emb_dim=embedding_dimensions)
+
+    # Use trained Models
+    start_sending_tweets(api, num_words=25, model_name='model-64', element_type=e_type)
