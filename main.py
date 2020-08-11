@@ -98,10 +98,11 @@ def get_words(sentences):
     return words
 
 
-def ready_dataset(element_type='word'):
+def ready_dataset(length, element_type='word'):
     """
     Prepares Dataset for Training and Mappings for both Training and testing either in terms of words or characters.
-    :param element_type: String, 'word' to predict one word at a time, 'char' to predict one character at a time.=
+    :param length: Integer; Sequence Length
+    :param element_type: String; 'word' to predict one word at a time, 'char' to predict one character at a time.=
     :returns:
     dataset: Tensor; (input, target) data;
     ind2char: Dictionary; Mapping from index to character/word
@@ -115,7 +116,7 @@ def ready_dataset(element_type='word'):
     # Make Mappings
     char2ind = {char: index for index, char in enumerate(vocab)}
     ind2char = np.array(vocab)
-    per_epoch = len(text) // (sequence_length + 1)
+    per_epoch = len(text) // (length + 1)
 
     def xy_split(this_text):
         x_text = this_text[:-1]
@@ -125,7 +126,7 @@ def ready_dataset(element_type='word'):
     # Create training dataset.
     text_int = np.array([char2ind[char] for char in text])
     char_dataset = tf.data.Dataset.from_tensor_slices(text_int)
-    sequences = char_dataset.batch(sequence_length + 1, drop_remainder=True)
+    sequences = char_dataset.batch(length + 1, drop_remainder=True)
     dataset = sequences.map(xy_split)
     dataset = dataset.shuffle(buffer_size).batch(batch_size, drop_remainder=True)
     return dataset, ind2char, char2ind, per_epoch, len(vocab)
@@ -148,18 +149,7 @@ def ready_model(dataset, voc_size, batches=5, emb_dim=1, name='model'):
                 output_dim=emb_dim,
                 batch_input_shape=[batches, None]
             ),
-            LSTM(128,
-                 return_sequences=True,
-                 stateful=True,
-                 recurrent_initializer='glorot_uniform'
-                 ),
-            LSTM(128,
-                 return_sequences=True,
-                 stateful=True,
-                 recurrent_initializer='glorot_uniform'
-                 ),
-            Dropout(0.3),
-            LSTM(128,
+            LSTM(512,
                  return_sequences=True,
                  stateful=True,
                  recurrent_initializer='glorot_uniform'
@@ -174,9 +164,9 @@ def ready_model(dataset, voc_size, batches=5, emb_dim=1, name='model'):
     # end_callback = EarlyStopping(monitor='categorical_accuracy', min_delta=0.001)
 
     # Finalise and View Model Details
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    model.fit(dataset, epochs=1000, use_multiprocessing=True, workers=-1)
-    model.summary()
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+    model.fit(x=dataset, epochs=150, use_multiprocessing=True, workers=-1, callbacks=[saver_callback])
+    model.summary()                                                    
     return model
 
 
@@ -259,7 +249,7 @@ def start_sending_tweets(run_with_api, num_elements=None, model_name='model_twee
 if __name__ == '__main__':
     # Authenticate and analyse Basic Global Variables for RNN
     api = authenticate()
-    embedding_dimensions, batch_size, buffer_size, sequence_length, e_type = 10, 1, 10000, 25, 'word'
+    embedding_dimensions, batch_size, buffer_size, sequence_length, e_type = 128, 1, 10000, 100, 'char'
 
     # List of central tweets to revolve your Automatically Generated Tweets around
     tweets = [
@@ -313,8 +303,9 @@ if __name__ == '__main__':
     #    tweets.append(tweet_this)
 
     # Get Data and Train
-    data, i2c, c2i, text_per_epoch, vocabulary_size = ready_dataset(e_type)
-    out_model = ready_model(data, voc_size=vocabulary_size, batches=batch_size, emb_dim=embedding_dimensions)
-
+    data, i2c, c2i, text_per_epoch, vocabulary_size = ready_dataset(length=sequence_length, element_type=e_type)
+    sequence_length = text_per_epoch
+    #out_model = ready_model(data, voc_size=vocabulary_size, batches=batch_size, emb_dim=embedding_dimensions)
+    
     # Use trained Models
-    start_sending_tweets(api, num_elements=280, model_name='word_model_list_2', element_type=e_type)
+    start_sending_tweets(api, num_elements=280, model_name='model-100', element_type=e_type)
